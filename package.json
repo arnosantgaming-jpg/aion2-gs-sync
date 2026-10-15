@@ -1,0 +1,18 @@
+{
+  "name": "aion2-gs-sync",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Syncs AION 2 Gear Score and Combat Power from NCSOFT's API into a Google Sheet",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dry-run": "DRY_RUN=1 node src/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "google-auth-library": "^9.15.0"
+  }
+}

@@ -1,0 +1,44 @@
+name: Sync GS / CP
+
+on:
+  schedule:
+    # Every 15 minutes. GitHub's minimum is every 5 minutes ('*/5 * * * *'),
+    # and scheduled runs can start a few minutes late when GitHub is busy.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:        # adds a "Run workflow" button on the Actions tab
+    inputs:
+      dry_run:
+        description: 'Dry run (fetch only, do not write to the sheet)'
+        type: boolean
+        default: false
+      verbose:
+        description: 'Log every row'
+        type: boolean
+        default: false
+
+# Never run two syncs at the same time.
+concurrency:
+  group: gs-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci --omit=dev
+
+      - name: Sync sheet
+        run: node src/index.js
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          VERBOSE: ${{ inputs.verbose && '1' || '' }}

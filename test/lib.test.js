@@ -24,8 +24,8 @@ test('parseId reads Shugo meta tag', () => {
 test('parseApi reads NCSOFT JSON', () => {
   const j = { profile: { characterName: 'Arno', combatPower: 101799 },
     stat: { statList: [{ type: 'STR', value: 14 }, { type: 'ItemLevel', value: 2177 }] } };
-  assert.deepEqual(L.parseApi(j), { gs: 2177, cp: 101799, name: 'Arno' });
-  assert.deepEqual(L.parseApi({ profile: { combatPower: 1832 } }), { gs: 0, cp: 1832, name: '' });
+  assert.deepEqual(L.parseApi(j), { gs: 2177, cp: 101799, name: 'Arno', level: 0 });
+  assert.deepEqual(L.parseApi({ profile: { combatPower: 1832, characterLevel: 1 } }), { gs: 0, cp: 1832, name: '', level: 1 });
   assert.equal(L.parseApi({}), null);
   assert.equal(L.parseApi(null), null);
 });
@@ -78,4 +78,21 @@ test('mapLimit respects the limit and keeps order', async () => {
   });
   assert.deepEqual(out, [50, 10, 40, 20, 30]);
   assert.ok(peak <= 2);
+});
+
+test('boostVerdict: battleground jumps are held, real changes accepted', () => {
+  const f = { enabled: true, maxCpRatio: 1.5, maxGsRatio: 1.25, holdHours: 12, minLevel: 45 };
+  const prev = { gs: 2323, cp: 111000 };
+  const H = 3600000, at = 100 * H;
+  const v = (now, held) => L.boostVerdict({ prev, now: { level: 45, ...now }, held, at, f }).action;
+  assert.equal(v({ gs: 2330, cp: 112046 }), 'accept', 'normal upgrade');
+  assert.equal(v({ gs: 2500, cp: 150000 }), 'accept', '+35% CP is still a plausible upgrade');
+  assert.equal(v({ gs: 2323, cp: 300000 }), 'hold', 'battleground CP');
+  assert.equal(v({ gs: 3000, cp: 112000 }), 'hold', 'battleground GS');
+  assert.equal(v({ gs: 2323, cp: 300000 }, { firstSeen: at - 5 * H }), 'hold', 'still within 12h');
+  assert.equal(v({ gs: 2323, cp: 300000 }, { firstSeen: at - 13 * H }), 'accept-after-hold', 'lasted 12h+');
+  assert.equal(v({ gs: 2000, cp: 90000 }), 'accept', 'drops always written');
+  assert.equal(L.boostVerdict({ prev, now: { level: 40, gs: 2323, cp: 300000 }, at, f }).action, 'accept', 'levelling chars not filtered');
+  assert.equal(L.boostVerdict({ prev: { gs: 'Invalid IGN', cp: '' }, now: { level: 45, gs: 2323, cp: 300000 }, at, f }).action, 'accept', 'no previous numbers');
+  assert.equal(L.boostVerdict({ prev, now: { level: 45, gs: 2323, cp: 300000 }, at, f: { ...f, enabled: false } }).action, 'accept', 'filter off');
 });

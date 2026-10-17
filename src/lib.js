@@ -55,7 +55,7 @@ function parseApi(json) {
     const il = list.find(s => s && s.type === 'ItemLevel');
     if (il) gs = Number(il.value) || 0;
   }
-  return { gs, cp: p.combatPower, name: p.characterName || '' };
+  return { gs, cp: p.combatPower, name: p.characterName || '', level: Number(p.characterLevel) || 0 };
 }
 
 function cacheKey(region, server, name) {
@@ -140,7 +140,27 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
+/**
+ * Battleground boosts multiply CP/GS for a while. Decide what to do with a new reading:
+ *  - 'accept'             normal change (or a drop, or the filter doesn't apply) -> write it
+ *  - 'hold'               huge jump -> keep the old numbers for now
+ *  - 'accept-after-hold'  the huge jump has lasted holdHours -> it's real, write it
+ * prev: numbers currently in the sheet; now: {gs, cp, level}; held: {firstSeen} if already holding.
+ */
+function boostVerdict({ prev, now, held, at, f }) {
+  if (!f || !f.enabled) return { action: 'accept' };
+  if (!isGood(prev.cp) || prev.cp <= 0) return { action: 'accept' };          // nothing to compare with
+  if ((now.level || 0) < f.minLevel) return { action: 'accept' };            // levelling up legitimately
+  const cpJump = now.cp > prev.cp * f.maxCpRatio;
+  const gsJump = isGood(prev.gs) && prev.gs > 0 && now.gs > prev.gs * f.maxGsRatio;
+  if (!cpJump && !gsJump) return { action: 'accept' };
+  const heldHours = held ? (at - held.firstSeen) / 3600000 : 0;
+  if (held && heldHours >= f.holdHours) return { action: 'accept-after-hold', heldHours };
+  return { action: 'hold', heldHours };
+}
+
 module.exports = {
+  boostVerdict,
   colLetter, quoteSheet, colRange, column, clean, parseId, parseApi,
   cacheKey, formatTimestamp, isGood, buildWrite, mapLimit,
 };

@@ -85,6 +85,38 @@ async function saveCache(sheets, cache) {
   if (rows.length) await sheets.batchUpdate([{ range: L.quoteSheet(cfg.cacheSheet) + '!A2:D' + (rows.length + 1), values: rows }], 'RAW');
 }
 
+// ---------------------------------------------------------------- held boosts (hidden tab)
+// key -> { gs, cp, firstSeen (ms) } for characters whose last reading looked like a battleground boost.
+
+async function loadPending(sheets, meta) {
+  const f = cfg.boostFilter;
+  if (!f || !f.enabled) return new Map();
+  if (!meta.sheets.some(s => s.title === f.sheet)) {
+    if (DRY_RUN) return new Map();
+    await sheets.addHiddenSheet(f.sheet);
+    await sheets.batchUpdate([{ range: L.quoteSheet(f.sheet) + '!A1:D1', values: [['key', 'heldGS', 'heldCP', 'firstSeen']] }], 'RAW');
+    log(`Created hidden tab "${f.sheet}" for held battleground readings`);
+    return new Map();
+  }
+  const [rows] = await sheets.batchGet([L.quoteSheet(f.sheet) + '!A2:D']);
+  const map = new Map();
+  for (const r of rows) {
+    const t = Date.parse(r[3]);
+    if (r[0] && !isNaN(t)) map.set(String(r[0]), { gs: Number(r[1]), cp: Number(r[2]), firstSeen: t });
+  }
+  return map;
+}
+
+async function savePending(sheets, pending) {
+  const f = cfg.boostFilter;
+  if (DRY_RUN || !f || !f.enabled) return;
+  const cutoff = Date.now() - 7 * 86400000;           // forget very old entries
+  const rows = [...pending.entries()].filter(([, v]) => v.firstSeen > cutoff).sort()
+    .map(([k, v]) => [k, v.gs, v.cp, new Date(v.firstSeen).toISOString()]);
+  await sheets.clear(L.quoteSheet(f.sheet) + '!A2:D');
+  if (rows.length) await sheets.batchUpdate([{ range: L.quoteSheet(f.sheet) + '!A2:D' + (rows.length + 1), values: rows }], 'RAW');
+}
+
 // ---------------------------------------------------------------- per-sheet
 
 function headerOk(name, layout, header) {
@@ -133,6 +165,8 @@ async function main(sheets) {
 
   const cache = await loadCache(sheets, meta);
   log(`Known character IDs: ${cache.size}`);
+  const pending = await loadPending(sheets, meta);
+  if (pending.size) log(`Held battleground readings from earlier runs: ${pending.size}`);
 
   // 1) Read every configured tab.
   const tabs = [];
@@ -163,7 +197,7 @@ async function main(sheets) {
   log(`Rows: ${stats.rows} | characters to fetch: ${all.length} (${known} with known ID) | TBC: ${stats.tbc} | incomplete: ${stats.incomplete}`);
 
   const where = j => j.rows.map(r => `${r.tab.name}!${r.i + cfg.startRow}`).join(',');
-  const outcome = { ok: 0, notFound: 0, failed: 0, idLookups: 0, idsSaved: 0, renamed: 0 };
+  const outcome = { ok: 0, notFound: 0, failed: 0, held: 0, idLookups: 0, idsSaved: 0, renamed: 0 };
   const setResult = (j, r) => j.rows.forEach(({ tab, i }) => tab.results.set(i, r));
 
   // 3) Look up missing IDs via Shugo (only new characters).
@@ -215,8 +249,25 @@ async function main(sheets) {
     const r = await fetchStats(j);
     if (r === 'notfound') { outcome.notFound++; setResult(j, 'notfound'); log(`❌ ${where(j)} "${j.name}": not found`); }
     else if (r.error) { outcome.failed++; log(`⚠️  ${where(j)} "${j.name}" on ${j.server}: ${r.error} (kept existing values)`); }
-    else { outcome.ok++; setResult(j, { gs: r.gs, cp: r.cp }); if (VERBOSE) log(`   ${where(j)} "${j.name}": GS ${r.gs}, CP ${r.cp}`); }
+    else {
+      const first = j.rows[0];
+      const prev = { gs: first.tab.snap.gs[first.i], cp: first.tab.snap.cp[first.i] };
+      const verdict = L.boostVerdict({ prev, now: r, held: pending.get(j.key), at: Date.now(), f: cfg.boostFilter });
+      if (verdict.action === 'hold') {
+        outcome.held++;
+        if (!pending.has(j.key)) pending.set(j.key, { gs: r.gs, cp: r.cp, firstSeen: Date.now() });
+        log(`⏸️  ${where(j)} "${j.name}": GS ${prev.gs} → ${r.gs}, CP ${prev.cp} → ${r.cp} looks like a battleground boost; ` +
+            `not written (held ${verdict.heldHours.toFixed(1)}h of ${cfg.boostFilter.holdHours}h)`);
+        return;
+      }
+      if (verdict.action === 'accept-after-hold') log(`✅ ${where(j)} "${j.name}": big jump lasted ${cfg.boostFilter.holdHours}h+, accepting GS ${r.gs}, CP ${r.cp}`);
+      if (pending.has(j.key) && verdict.action === 'accept') log(`   ${where(j)} "${j.name}": back to normal (GS ${r.gs}, CP ${r.cp}), boost discarded`);
+      pending.delete(j.key);
+      outcome.ok++; setResult(j, { gs: r.gs, cp: r.cp });
+      if (VERBOSE) log(`   ${where(j)} "${j.name}": GS ${r.gs}, CP ${r.cp}`);
+    }
   });
+  await savePending(sheets, pending);
   if (outcome.renamed) await saveCache(sheets, cache);
 
   // 5) Re-read and write back (only rows whose IGN/server didn't change meanwhile).
@@ -243,14 +294,14 @@ async function main(sheets) {
   else await sheets.batchUpdate(data);
 
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
-  const summary = `✅ ${outcome.ok} updated | ❌ ${outcome.notFound} not found | ⚠️ ${outcome.failed} failed | ` +
+  const summary = `✅ ${outcome.ok} updated | ⏸️ ${outcome.held} held (battleground?) | ❌ ${outcome.notFound} not found | ⚠️ ${outcome.failed} failed | ` +
     `${outcome.idLookups} ID lookups (${outcome.idsSaved} saved) | ${secs}s`;
   log(`===== SYNC DONE: ${summary} =====`);
 
   if (process.env.GITHUB_STEP_SUMMARY) {
-    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-      `### AION 2 GS/CP sync\n\n| Updated | Not found | Failed | ID lookups | Time |\n|---|---|---|---|---|\n` +
-      `| ${outcome.ok} | ${outcome.notFound} | ${outcome.failed} | ${outcome.idLookups} | ${secs}s |\n`);
+    let md = `### AION 2 GS/CP sync\n\n| Updated | Held (battleground?) | Not found | Failed | ID lookups | Time |\n|---|---|---|---|---|---|\n` +
+      `| ${outcome.ok} | ${outcome.held} | ${outcome.notFound} | ${outcome.failed} | ${outcome.idLookups} | ${secs}s |\n`;
+    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);
   }
   // Fail the run only if nothing at all worked (so you get GitHub's failure email).
   if (all.length && outcome.ok === 0 && outcome.notFound < all.length) process.exitCode = 1;

@@ -73,7 +73,7 @@ function installFetch() {
       const [name, c] = Object.entries(CHARS).find(([, v]) => v.id === id) || [];
       if (!c) return { status: 200, ok: true, json: async () => ({ profile: null }) };
       const stat = c.gs ? { statList: [{ type: 'ItemLevel', value: c.gs }] } : { statList: [] };
-      return { status: 200, ok: true, json: async () => ({ profile: { characterName: name, combatPower: c.cp }, stat }) };
+      return { status: 200, ok: true, json: async () => ({ profile: { characterName: name, combatPower: c.cp, characterLevel: 45 }, stat }) };
     }
     throw new Error('unexpected url ' + url);
   };
@@ -155,4 +155,35 @@ test('rows inserted during the run are not overwritten wrongly', async () => {
   assert.equal(M[1][1], 'Newbie');
   assert.deepEqual([M[1][7], M[1][8]], ['', ''], 'inserted row not given Arno\'s numbers');
   assert.deepEqual([M[2][7], M[2][8]], [2135, 102641], 'shifted Arno row kept old values this run');
+});
+
+
+test('battleground boost is not written; real value restored; long jumps accepted after 12h', async () => {
+  CHARS.Arno.cp = 101799; CHARS.Arno.gs = 2177;
+  const { main } = require('../src/index');
+  const sheets = makeSheet();                 // Arno starts at GS 2135 / CP 102641
+  const M = sheets.tabs.Main;
+
+  // Run 1: Arno is in a battleground -> CP 300k is held, sheet keeps 102641.
+  installFetch(); CHARS.Arno.cp = 300000;
+  const o1 = await main(sheets);
+  assert.deepEqual([M[1][7], M[1][8]], [2135, 102641], 'boosted reading not written');
+  assert.equal(o1.held, 1);
+  assert.equal(sheets.hidden._pending, true, 'hidden _pending tab created');
+  assert.equal(sheets.tabs._pending[1][0], 'as|siel|Arno');
+
+  // Run 2: back out of battleground -> real numbers written, hold cleared.
+  installFetch(); CHARS.Arno.cp = 101799;
+  const o2 = await main(sheets);
+  assert.deepEqual([M[1][7], M[1][8]], [2177, 101799]);
+  assert.equal(o2.held, 0);
+  assert.equal((sheets.tabs._pending[1] || [])[0] || '', '', 'hold cleared');
+
+  // Run 3: a huge jump that has already lasted 13h (e.g. a real massive upgrade) is accepted.
+  installFetch(); CHARS.Arno.cp = 250000;
+  sheets.tabs._pending[1] = ['as|siel|Arno', 2177, 250000, new Date(Date.now() - 13 * 3600000).toISOString()];
+  const o3 = await main(sheets);
+  assert.equal(M[1][8], 250000, 'accepted after the hold time');
+  assert.equal(o3.held, 0);
+  CHARS.Arno.cp = 101799;
 });
